@@ -1,73 +1,57 @@
 #[macro_use]
 extern crate nom;
-use nom::{IResult, digit};
-pub use std::collections::BTreeMap;
 
-#[derive(Debug)]
-pub struct ParserError {
-    data: String
-}
-impl std::fmt::Display for ParserError {
-    fn fmt(&self, fmt: &mut std::fmt::Formatter) -> std::fmt::Result {
-    write!(fmt, "{}", self.data)
-}
-}
-impl std::error::Error for ParserError {
-    fn description(&self) -> &str {
-        &self.data
-    }
-}
-impl<'a> From<nom::Err<&'a [u8]>> for ParserError {
-    fn from(e: nom::Err<&'a [u8]>) -> ParserError {
-        ParserError {
-            data: format!("Error: {:?}", e)
-        }
-    }
-}
+use std::collections::BTreeMap;
+use std::str;
+use std::str::FromStr;
+use std::ops::Neg;
+use nom::{IResult, digit};
+use nom::IResult::*;
 
 #[derive(Debug, PartialEq, Eq)]
-enum BVal {
+pub enum BVal {
     BInt(i64),
     BStr(String),
     BList(Vec<BVal>),
     BDict(BTreeMap<String, BVal>),
 }
 
-fn digits<O>(input: &[u8]) -> IResult<&[u8], O>
-where O: std::str::FromStr {
-    map_res!(input, map_res!(digit, std::str::from_utf8), std::str::FromStr::from_str)
+fn digits<O: FromStr>(input: &[u8]) -> IResult<&[u8], O> {
+    map_res!(input, map_res!(digit, str::from_utf8), FromStr::from_str)
 }
 
-fn num<O: std::ops::Neg<Output=O>>(input: &[u8]) -> IResult<&[u8], O>
-where O: std::str::FromStr {
+fn num<O: Neg<Output = O> + FromStr>(input: &[u8]) -> IResult<&[u8], O> {
     chain!(input,
-        char!('i') ~
+        char!('i')       ~
         neg: char!('-')? ~
-        n: digits ~
-        char!('e') ,
+        n: digits        ~
+        char!('e')       ,
         ||{
-            let n:O = n;
+            let n: O = n;
             if neg.is_some() {n.neg()} else {n}
         })
 }
 
-
 fn string(input: &[u8]) -> IResult<&[u8], String> {
-    let parse_len: IResult<&[u8], usize> =
-        chain!(input,
+    let parse_len: IResult<&[u8], usize> = chain!(input,
                len: digits ~
-               char!(':') ,
+               char!(':')  ,
                || {len}
         );
 
     match parse_len {
-        IResult::Done(left, len)    => map_res!(left, map!(take!(len), |s: &[u8]| {s.to_vec()}), String::from_utf8),
-        IResult::Incomplete(needed) => IResult::Incomplete(needed),
-        IResult::Error(err)         => IResult::Error(err),
+        Done(left, len) => {
+            map_res!(left,
+                     map!(take!(len), |s: &[u8]| s.to_vec()),
+                     String::from_utf8)
+        }
+        Incomplete(needed) => Incomplete(needed),
+        Error(err) => Error(err),
     }
 }
 
 named!(list< Vec<BVal> >, delimited!(char!('l'), many0!(bval), char!('e')));
+
 named!(dict< BTreeMap<String, BVal> >,
        delimited!(
            char!('d'),
@@ -82,73 +66,95 @@ named!(dict< BTreeMap<String, BVal> >,
        )
 );
 
-named!(bnum<BVal>, map!(num, BVal::BInt));
+named!(bnum<BVal>,    map!(num,    BVal::BInt));
 named!(bstring<BVal>, map!(string, BVal::BStr));
-named!(blist<BVal>, map!(list, BVal::BList));
-named!(bdict<BVal>, map!(dict, BVal::BDict));
+named!(blist<BVal>,   map!(list,   BVal::BList));
+named!(bdict<BVal>,   map!(dict,   BVal::BDict));
+
 named!(bval<BVal>, alt!(bnum | bstring | blist | bdict));
+
+pub fn parse_bencode(input: &[u8]) -> Option<BVal> {
+    match bval(input) {
+        Done(_, val) => Some(val),
+        _ => None,
+    }
+}
 
 #[cfg(test)]
 mod tests {
-    use nom::IResult;
-    use nom::IResult::*;
-    use super::BVal::*;
-    use super::BTreeMap;
+    pub use nom::IResult;
+    pub use nom::IResult::*;
 
-    fn parse<I, O, F>(parser: F, input: I) -> O
-        where F: Fn(I) -> IResult<I,O> {
+    pub fn parse<I, O, F>(parser: F, input: I) -> O
+        where F: Fn(I) -> IResult<I, O>
+    {
         match parser(input) {
             Done(_, n) => n,
             Incomplete(i) => panic!(format!("Incomplete: {:?}", i)),
-            _ => panic!("Error while parsing number"),
+            _ => panic!("Error while parsing"),
         }
     }
 
-    fn parse_num(input: &[u8]) -> i64 { parse(super::num, input) }
+    mod num {
+        use super::parse;
+        use super::super::num;
 
-    #[test]
-    fn test_num_1digit() {
-        assert_eq!(1, parse_num(b"i1e"));
+        fn parse_num(input: &[u8]) -> i64 {
+            parse(num, input)
+        }
+
+        #[test]
+        fn digit1() {
+            assert_eq!(1, parse_num(b"i1e"));
+        }
+
+        #[test]
+        fn digit2() {
+            assert_eq!(123, parse_num(b"i123e"));
+        }
+
+        #[test]
+        fn negative() {
+            assert_eq!(-6, parse_num(b"i-6e"));
+        }
     }
 
     #[test]
-    fn test_num_2digit() {
-        assert_eq!(123, parse_num(b"i123e"));
-    }
-
-    #[test]
-    fn test_num_negative() {
-        assert_eq!(-6, parse_num(b"i-6e"));
-    }
-
-    #[test]
-    fn test_string() {
+    fn string() {
         assert_eq!("Hello!".to_string(), parse(super::string, b"6:Hello!"));
     }
 
-    #[test]
-    fn test_bval_num() {
-        assert_eq!(BInt(-300), parse(super::bval, b"i-300e"));
-    }
+    mod bval {
+        use std::collections::BTreeMap;
+        use super::parse;
+        use super::super::BVal::*;
+        use super::super::bval;
 
-    #[test]
-    fn test_bval_string() {
-        assert_eq!(BStr("Hello!".to_string()), parse(super::bval, b"6:Hello!"));
-    }
+        #[test]
+        fn bval_num() {
+            assert_eq!(BInt(-300), parse(bval, b"i-300e"));
+        }
 
-    #[test]
-    fn test_bval_list() {
-        let list = BList(vec![BInt(0), BStr("Hello!".to_string()), BInt(2)]);
-        assert_eq!(list, parse(super::bval, b"li0e6:Hello!i2ee"));
-    }
+        #[test]
+        fn bval_string() {
+            assert_eq!(BStr("Hello!".to_string()), parse(bval, b"6:Hello!"));
+        }
 
-    #[test]
-    fn test_bval_dict() {
-        let mut dict = BTreeMap::new();
-        dict.insert("Pears".to_string(), BInt(5));
-        dict.insert("Apples".to_string(), BInt(-4));
-        dict.insert("Bananas".to_string(), BList(vec![BInt(5), BInt(2), BStr(":(".to_string())]));
-        let dict = BDict(dict);
-        assert_eq!(dict, parse(super::bval, b"d6:Applesi-4e7:Bananasli5ei2e2::(e5:Pearsi5ee"));
+        #[test]
+        fn bval_list() {
+            let list = BList(vec![BInt(0), BStr("Hello!".to_string()), BInt(2)]);
+            assert_eq!(list, parse(bval, b"li0e6:Hello!i2ee"));
+        }
+
+        #[test]
+        fn bval_dict() {
+            let mut dict = BTreeMap::new();
+            dict.insert("Pears".to_string(), BInt(5));
+            dict.insert("Apples".to_string(), BInt(-4));
+            dict.insert("Bananas".to_string(),
+                        BList(vec![BInt(5), BInt(2), BStr(":(".to_string())]));
+            let dict = BDict(dict);
+            assert_eq!(dict, parse(bval, b"d6:Applesi-4e7:Bananasli5ei2e2::(e5:Pearsi5ee"));
+        }
     }
 }
