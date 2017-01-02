@@ -1,12 +1,12 @@
 #[macro_use]
 extern crate nom;
 
-use std::collections::BTreeMap;
-use std::str;
-use std::str::FromStr;
-use std::ops::Neg;
 use nom::{IResult, digit};
 use nom::IResult::*;
+use std::collections::BTreeMap;
+use std::ops::Neg;
+use std::str;
+use std::str::FromStr;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum BVal {
